@@ -11,21 +11,13 @@ module ActiveRecord
   class Base
     # Establishes a connection to the database that's used by all Active Record objects
     def self.postgresql_connection(config) # :nodoc:
-      config = config.symbolize_keys
-      host     = config[:host]
-      port     = config[:port] || 5432
-      username = config[:username].to_s if config[:username]
-      password = config[:password].to_s if config[:password]
-
-      if config.key?(:database)
-        database = config[:database]
-      else
+      if !config.key?(:database)
         raise ArgumentError, "No database specified. Missing argument: database."
       end
 
       # The postgres drivers don't allow the creation of an unconnected PGconn object,
       # so just pass a nil connection object for the time being.
-      ConnectionAdapters::PostgreSQLAdapter.new(nil, logger, [host, port, nil, nil, database, username, password], config)
+      ConnectionAdapters::PostgreSQLAdapter.new(nil, logger, nil, config)
     end
   end
 
@@ -305,8 +297,35 @@ module ActiveRecord
         include Arel::Visitors::BindVisitor
       end
 
+      # lifted from the postgresql_connection method:
+      #   https://github.com/rails/rails/blob/4-2-stable/activerecord/lib/active_record/connection_adapters/postgresql_adapter.rb#L23-L45
+      #
+      # However, I put it deep in here so that it can intercept postgis and
+      # makara configuration as well.
+      VALID_CONN_PARAMS = [:host, :hostaddr, :port, :dbname, :user, :password, :connect_timeout,
+                           :client_encoding, :options, :application_name, :fallback_application_name,
+                           :keepalives, :keepalives_idle, :keepalives_interval, :keepalives_count,
+                           :tty, :sslmode, :requiressl, :sslcompression, :sslcert, :sslkey,
+                           :sslrootcert, :sslcrl, :requirepeer, :krbsrvname, :gsslib, :service]
+
+      # assumes that that config contains all the connection info
+      def collect_connection_params(config)
+        conn_params = config.symbolize_keys
+
+        conn_params.delete_if { |_, v| v.nil? }
+
+        # Map ActiveRecords param names to PGs.
+        conn_params[:user]   = conn_params.delete(:username) if conn_params[:username]
+        conn_params[:dbname] = conn_params.delete(:database) if conn_params[:database]
+        conn_params[:port]   = config[:port] || 5432
+
+        # Forward only valid config params to PGconn.connect.
+        conn_params.keep_if { |k, _| VALID_CONN_PARAMS.include?(k) }
+        [conn_params]
+      end
+
       # Initializes and connects a PostgreSQL adapter.
-      def initialize(connection, logger, connection_parameters, config)
+      def initialize(connection, logger, _connection_parameters, config)
         super(connection, logger)
 
         if config.fetch(:prepared_statements) { true }
@@ -315,7 +334,8 @@ module ActiveRecord
           @visitor = BindSubstitution.new self
         end
 
-        @connection_parameters, @config = connection_parameters, config
+        @config = config
+        @connection_parameters = collect_connection_params(config)
 
         # @local_tz is initialized as nil to avoid warnings when connect tries to use it
         @local_tz = nil
@@ -1247,6 +1267,22 @@ module ActiveRecord
             execute("SET time zone 'UTC'", 'SCHEMA')
           elsif @local_tz
             execute("SET time zone '#{@local_tz}'", 'SCHEMA')
+          end
+
+
+          # lifted from:
+          #   https://github.com/rails/rails/blob/4-2-stable/activerecord/lib/active_record/connection_adapters/postgresql_adapter.rb#L688-L698
+          #
+          # SET statements from :variables config hash
+          # http://www.postgresql.org/docs/8.3/static/sql-set.html
+          variables = @config[:variables] || {}
+          variables.map do |k, v|
+            if v == ':default' || v == :default
+              # Sets the value to the global or compile default
+              execute("SET SESSION #{k} TO DEFAULT", 'SCHEMA')
+            elsif !v.nil?
+              execute("SET SESSION #{k} TO #{quote(v)}", 'SCHEMA')
+            end
           end
         end
 

@@ -7,6 +7,19 @@ module ActiveRecord
       @connection = ActiveRecord::Base.connection
     end
 
+    def test_passing_connection_info
+      config = { connect_timeout: 123, not_a_valid_param: 'hello' }
+      output = @connection.send(:collect_connection_params, config)
+      assert_equal output.first[:port], 5432
+      assert_equal output.first[:connect_timeout], 123
+      assert_nil output.first[:not_a_valid_param]
+    end
+
+    def test_variables
+      result = @connection.execute("show statement_timeout").to_a
+      assert_equal result.first["statement_timeout"], "90s"
+    end
+
     def test_encoding
       assert_not_nil @connection.encoding
     end

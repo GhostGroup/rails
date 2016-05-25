@@ -111,9 +111,13 @@ connections:
 
   postgresql:
     arunit:
+      variables:
+        statement_timeout: 90s
       min_messages: warning
     arunit2:
       min_messages: warning
+      variables:
+        statement_timeout: 90s
 
   sqlite3:
     arunit:
